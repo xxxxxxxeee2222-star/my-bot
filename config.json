@@ -1,0 +1,9 @@
+{
+  "telegram_bot_token": "8530377687:AAEL0YR1knMRjaeLnAHIf2xOrdoZQbNmJEI",
+  "bridge_url": "http://YOUR_SERVER_IP:25955/request",
+  "bridge_token": "CHANGE_ME_SUPER_SECRET_TOKEN",
+  "poll_timeout_seconds": 30,
+  "required_channel": "@MiridesSMP",
+  "required_channel_url": "https://t.me/MiridesSMP",
+  "max_nicks_per_account": 3
+}
