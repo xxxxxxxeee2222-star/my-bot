@@ -15,7 +15,6 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR)).resolve()
 CONFIG_PATH = BASE_DIR / "config.json"
 STORAGE_PATH = DATA_DIR / "users.json"
 STATE_PATH = DATA_DIR / "state.json"
-BANNED_WORDS_PATH = BASE_DIR / "banned_words.json"
 NICKNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 ALLOWED_MEMBER_STATUSES = {"creator", "administrator", "member"}
 
@@ -121,16 +120,6 @@ def load_state():
     return state if isinstance(state, dict) else {}
 
 
-def load_banned_words():
-    words = load_json(BANNED_WORDS_PATH, [])
-    normalized = []
-    for word in words:
-        word = str(word).strip().lower()
-        if word and word not in normalized:
-            normalized.append(word)
-    return normalized
-
-
 def telegram_request(token, method, params=None):
     params = params or {}
     data = urllib.parse.urlencode(params).encode("utf-8")
@@ -163,6 +152,34 @@ def send_message(token, chat_id, text, reply_markup=None):
     if reply_markup:
         params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     telegram_request(token, "sendMessage", params)
+
+
+def set_bot_commands(config):
+    token = config["telegram_bot_token"]
+    public_commands = [
+        {"command": "request", "description": "добавить ник"},
+        {"command": "my_nicks", "description": "мои ники"},
+        {"command": "status", "description": "статус"},
+        {"command": "help", "description": "помощь"},
+    ]
+    telegram_request(token, "setMyCommands", {"commands": json.dumps(public_commands, ensure_ascii=False)})
+
+    admin_commands = public_commands + [
+        {"command": "admin", "description": "админ-панель"},
+        {"command": "add_nick", "description": "добавить ник игроку"},
+        {"command": "del_nick", "description": "удалить ник из базы"},
+        {"command": "find_nick", "description": "найти ник"},
+        {"command": "all_nicks", "description": "все ники"},
+    ]
+    for admin_id in normalize_admin_ids(config):
+        telegram_request(
+            token,
+            "setMyCommands",
+            {
+                "commands": json.dumps(admin_commands, ensure_ascii=False),
+                "scope": json.dumps({"type": "chat", "chat_id": int(admin_id)}),
+            },
+        )
 
 
 def request_bridge(bridge_url, bridge_token, telegram_id, nickname):
@@ -261,14 +278,10 @@ def build_subscription_required_message(config, missing):
 
 
 def build_start_text(config, storage=None):
-    accounts = nick_count = None
-    if storage is not None:
-        accounts, nick_count = storage_stats(storage)
-
     lines = [
         "<b>MiridesSMP whitelist</b>",
         "",
-        "Бот добавляет Minecraft-ник сразу на оба сервера: основной и hub.",
+        "Бот добавляет Minecraft-ник в whitelist сервера.",
         "",
         "<b>Как войти:</b>",
         "1. Подпишись на каналы ниже.",
@@ -284,25 +297,21 @@ def build_start_text(config, storage=None):
         "<code>/status</code> - статус бота",
         "<code>/help</code> - помощь",
     ]
-    if accounts is not None:
-        lines.extend(["", f"<b>Сейчас в базе:</b> {nick_count} ников / {accounts} Telegram"])
     return "\n".join(lines)
 
 
 def build_status_text(config, storage, telegram_id):
-    accounts, nick_count = storage_stats(storage)
     own_nicks = storage.get(telegram_id, [])
-    hub_enabled = "включен" if config.get("hub_bridge_url") else "выключен"
+    servers_status = "работают" if config.get("hub_bridge_url") else "работает"
+    nicks_text = "нет" if not own_nicks else "\n".join(f"• {html.escape(nick)}" for nick in own_nicks)
     return "\n".join(
         [
-            "<b>Статус whitelist-бота</b>",
+            "<b>Статус</b>",
             "",
-            f"Основной сервер: <b>включен</b>",
-            f"Hub сервер: <b>{hub_enabled}</b>",
-            f"Каналов для проверки: <b>{len(required_channels(config))}</b>",
-            f"Ников в базе: <b>{nick_count}</b>",
-            f"Telegram в базе: <b>{accounts}</b>",
+            f"Сервера: <b>{servers_status}</b>",
             f"Твои ники: <b>{len(own_nicks)}</b> / <b>{html.escape(str(config['max_nicks_per_account']))}</b>",
+            "",
+            nicks_text,
         ]
     )
 
@@ -332,15 +341,7 @@ def split_message(text, limit=3900):
     return chunks
 
 
-def find_banned_fragment(nickname, banned_words):
-    lowered = nickname.lower()
-    for word in banned_words:
-        if word in lowered:
-            return word
-    return None
-
-
-def validate_nickname(nickname, banned_words):
+def validate_nickname(nickname):
     if not NICKNAME_PATTERN.fullmatch(nickname):
         return (
             False,
@@ -357,14 +358,18 @@ def validate_nickname(nickname, banned_words):
             ),
         )
 
-    banned_fragment = find_banned_fragment(nickname, banned_words)
-    if banned_fragment:
-        return (
-            False,
-            f"<b>Ник запрещен</b>\n\nНайден запрещенный фрагмент: <code>{html.escape(banned_fragment)}</code>",
-        )
-
     return True, ""
+
+
+def is_admin(config, telegram_id):
+    return str(telegram_id) in normalize_admin_ids(config)
+
+
+def require_admin(config, chat_id, telegram_id):
+    if is_admin(config, telegram_id):
+        return True
+    send_message(config["telegram_bot_token"], chat_id, "Эта команда доступна только админам.")
+    return False
 
 
 def bridge_error_text(place, exc):
@@ -375,12 +380,12 @@ def bridge_error_text(place, exc):
     return f"{place}: {html.escape(str(exc))}"
 
 
-def handle_request(config, storage, banned_words, chat_id, telegram_id, nickname):
+def handle_request(config, storage, chat_id, telegram_id, nickname):
     token = config["telegram_bot_token"]
     nickname = nickname.strip()
     escaped_nickname = html.escape(nickname)
 
-    is_valid, reason = validate_nickname(nickname, banned_words)
+    is_valid, reason = validate_nickname(nickname)
     if not is_valid:
         send_message(token, chat_id, reason)
         return storage
@@ -452,10 +457,10 @@ def handle_request(config, storage, banned_words, chat_id, telegram_id, nickname
             chat_id,
             "\n".join(
                 [
-                    "<b>Ник добавлен на основной сервер, но hub не ответил</b>",
+                    "<b>Ник добавлен, но один сервер временно не ответил</b>",
                     "",
                     f"Ник: <code>{escaped_nickname}</code>",
-                    f"<code>{bridge_error_text('hub', exc)}</code>",
+                    f"<code>{bridge_error_text('server', exc)}</code>",
                 ]
             ),
         )
@@ -466,7 +471,7 @@ def handle_request(config, storage, banned_words, chat_id, telegram_id, nickname
         send_message(
             token,
             chat_id,
-            f"<b>Ник добавлен на основной сервер, но hub отклонил запрос</b>\n\n<code>{error}</code>",
+            f"<b>Ник добавлен, но один сервер отклонил запрос</b>\n\n<code>{error}</code>",
         )
         return storage
 
@@ -481,7 +486,7 @@ def handle_request(config, storage, banned_words, chat_id, telegram_id, nickname
                 "<b>Готово</b>",
                 "",
                 f"Ник <code>{escaped_nickname}</code> добавлен в whitelist.",
-                "Команда отправлена на основной сервер и hub.",
+                "Можно заходить на сервер.",
             ]
         ),
     )
@@ -522,7 +527,128 @@ def handle_all_nicks(config, storage, chat_id, telegram_id):
         send_message(token, chat_id, chunk)
 
 
-def process_message(config, storage, banned_words, message):
+def handle_admin_help(config, storage, chat_id, telegram_id):
+    if not require_admin(config, chat_id, telegram_id):
+        return
+
+    accounts, nick_count = storage_stats(storage)
+    send_message(
+        config["telegram_bot_token"],
+        chat_id,
+        "\n".join(
+            [
+                "<b>Админ-команды</b>",
+                "",
+                f"В базе: <b>{nick_count}</b> ников / <b>{accounts}</b> Telegram",
+                "",
+                "<code>/add_nick TELEGRAM_ID НИК</code> - добавить ник игроку без проверки подписки и лимита",
+                "<code>/del_nick TELEGRAM_ID НИК</code> - удалить ник из базы бота",
+                "<code>/find_nick НИК</code> - найти владельца ника",
+                "<code>/all_nicks</code> - показать все ники",
+            ]
+        ),
+    )
+
+
+def handle_admin_add_nick(config, storage, chat_id, telegram_id, args):
+    token = config["telegram_bot_token"]
+    if not require_admin(config, chat_id, telegram_id):
+        return storage
+
+    parts = args.split(maxsplit=1)
+    if len(parts) != 2:
+        send_message(token, chat_id, "Формат:\n<code>/add_nick TELEGRAM_ID НИК</code>")
+        return storage
+
+    target_id, nickname = parts[0].strip(), parts[1].strip()
+    if not target_id.isdigit():
+        send_message(token, chat_id, "Telegram ID должен быть числом.")
+        return storage
+
+    is_valid, reason = validate_nickname(nickname)
+    if not is_valid:
+        send_message(token, chat_id, reason)
+        return storage
+
+    current_nicks = storage.get(target_id, [])
+    if nickname.lower() in {nick.lower() for nick in current_nicks}:
+        send_message(token, chat_id, f"Ник уже есть у <code>{html.escape(target_id)}</code>.")
+        return storage
+
+    try:
+        result = request_whitelist(config, target_id, nickname)
+        if not result.get("ok"):
+            error = html.escape(str(result.get("error", "unknown_error")))
+            send_message(token, chat_id, f"Основной сервер отклонил ник:\n<code>{error}</code>")
+            return storage
+
+        hub_result = request_hub_access(config, target_id, nickname)
+        if not hub_result.get("ok"):
+            error = html.escape(str(hub_result.get("error", "unknown_error")))
+            send_message(token, chat_id, f"Один сервер отклонил ник:\n<code>{error}</code>")
+            return storage
+    except Exception as exc:
+        send_message(token, chat_id, f"Сервер не ответил:\n<code>{bridge_error_text('server', exc)}</code>")
+        return storage
+
+    current_nicks.append(nickname)
+    storage[target_id] = current_nicks
+    save_json(STORAGE_PATH, storage)
+    send_message(token, chat_id, f"Готово. <code>{html.escape(nickname)}</code> добавлен для <code>{html.escape(target_id)}</code>.")
+    return storage
+
+
+def handle_admin_del_nick(config, storage, chat_id, telegram_id, args):
+    token = config["telegram_bot_token"]
+    if not require_admin(config, chat_id, telegram_id):
+        return storage
+
+    parts = args.split(maxsplit=1)
+    if len(parts) != 2:
+        send_message(token, chat_id, "Формат:\n<code>/del_nick TELEGRAM_ID НИК</code>")
+        return storage
+
+    target_id, nickname = parts[0].strip(), parts[1].strip()
+    current_nicks = storage.get(target_id, [])
+    new_nicks = [nick for nick in current_nicks if nick.lower() != nickname.lower()]
+    if len(new_nicks) == len(current_nicks):
+        send_message(token, chat_id, "Такого ника у этого Telegram ID нет.")
+        return storage
+
+    if new_nicks:
+        storage[target_id] = new_nicks
+    else:
+        storage.pop(target_id, None)
+    save_json(STORAGE_PATH, storage)
+    send_message(token, chat_id, f"Удалил <code>{html.escape(nickname)}</code> из базы бота.")
+    return storage
+
+
+def handle_admin_find_nick(config, storage, chat_id, telegram_id, args):
+    token = config["telegram_bot_token"]
+    if not require_admin(config, chat_id, telegram_id):
+        return
+
+    needle = args.strip().lower()
+    if not needle:
+        send_message(token, chat_id, "Формат:\n<code>/find_nick НИК</code>")
+        return
+
+    matches = []
+    for target_id, nicks in storage.items():
+        for nick in nicks:
+            if needle in nick.lower():
+                matches.append(f"<code>{html.escape(target_id)}</code>: {html.escape(nick)}")
+
+    if not matches:
+        send_message(token, chat_id, "Ничего не найдено.")
+        return
+
+    for chunk in split_message("<b>Найдено:</b>\n\n" + "\n".join(matches)):
+        send_message(token, chat_id, chunk)
+
+
+def process_message(config, storage, message):
     token = config["telegram_bot_token"]
     chat_id = message["chat"]["id"]
     telegram_id = str(message["from"]["id"])
@@ -549,12 +675,29 @@ def process_message(config, storage, banned_words, message):
         handle_all_nicks(config, storage, chat_id, telegram_id)
         return storage
 
+    if command == "/admin":
+        handle_admin_help(config, storage, chat_id, telegram_id)
+        return storage
+
+    if command == "/add_nick":
+        args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+        return handle_admin_add_nick(config, storage, chat_id, telegram_id, args)
+
+    if command == "/del_nick":
+        args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+        return handle_admin_del_nick(config, storage, chat_id, telegram_id, args)
+
+    if command == "/find_nick":
+        args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+        handle_admin_find_nick(config, storage, chat_id, telegram_id, args)
+        return storage
+
     if command == "/request":
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             send_message(token, chat_id, "Формат команды:\n<code>/request ТВОЙ_НИК</code>")
             return storage
-        return handle_request(config, storage, banned_words, chat_id, telegram_id, parts[1])
+        return handle_request(config, storage, chat_id, telegram_id, parts[1])
 
     send_message(
         token,
@@ -590,10 +733,13 @@ def main():
     config = load_config()
     storage = load_storage()
     state = load_state()
-    banned_words = load_banned_words()
     token = config["telegram_bot_token"]
     offset = int(state.get("offset", 0) or 0)
 
+    try:
+        set_bot_commands(config)
+    except Exception as exc:
+        print(f"Cannot update bot commands: {exc}")
     print(f"Bot started. DATA_DIR={DATA_DIR}. Users={len(storage)}. Offset={offset}")
 
     while True:
@@ -613,7 +759,7 @@ def main():
                 save_json(STATE_PATH, state)
                 message = update.get("message")
                 if message:
-                    storage = process_message(config, storage, banned_words, message)
+                    storage = process_message(config, storage, message)
         except Exception as exc:
             print(f"Bot loop error: {exc}")
             time.sleep(5)
