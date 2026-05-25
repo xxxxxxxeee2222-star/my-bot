@@ -2,8 +2,20 @@
   "telegram_bot_token": "PASTE_TELEGRAM_BOT_TOKEN",
   "bridge_url": "http://YOUR_SERVER_IP:25955/request",
   "bridge_token": "CHANGE_ME_SUPER_SECRET_TOKEN",
+  "hub_bridge_url": "http://YOUR_HUB_IP:18589/request",
+  "hub_bridge_token": "CHANGE_ME_SUPER_SECRET_TOKEN",
   "poll_timeout_seconds": 30,
   "required_channel": "@your_channel",
   "required_channel_url": "https://t.me/your_channel",
+  "required_channels": [
+    {
+      "chat_id": "@your_channel",
+      "url": "https://t.me/your_channel"
+    },
+    {
+      "chat_id": "@your_second_channel",
+      "url": "https://t.me/your_second_channel"
+    }
+  ],
   "max_nicks_per_account": 3
 }

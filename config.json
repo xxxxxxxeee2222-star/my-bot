@@ -2,8 +2,23 @@
   "telegram_bot_token": "8530377687:AAEL0YR1knMRjaeLnAHIf2xOrdoZQbNmJEI",
   "bridge_url": "http://45.93.200.14:18587/request",
   "bridge_token": "MiridesBridge_25_03_2026_X7k9Qp",
+  "hub_bridge_url": "http://45.93.200.15:18589/request",
+  "hub_bridge_token": "MiridesBridge_25_03_2026_X7k9Qp",
   "poll_timeout_seconds": 30,
   "required_channel": "@MiridesSMP",
   "required_channel_url": "https://t.me/MiridesSMP",
+  "required_channels": [
+    {
+      "chat_id": "@MiridesSMP",
+      "url": "https://t.me/MiridesSMP"
+    },
+    {
+      "chat_id": "@MirideSMP",
+      "url": "https://t.me/MirideSMP"
+    }
+  ],
+  "admin_ids": [
+    "5857829625"
+  ],
   "max_nicks_per_account": 3
 }
