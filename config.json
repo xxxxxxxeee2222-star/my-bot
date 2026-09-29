@@ -1,6 +1,6 @@
 {
   "telegram_bot_token": "8530377687:AAEL0YR1knMRjaeLnAHIf2xOrdoZQbNmJEI",
-  "bridge_url": "http://45.93.200.14:18587/request",
+  "bridge_url": "http://45.93.200.15:18589/request",
   "bridge_token": "MiridesBridge_25_03_2026_X7k9Qp",
   "hub_bridge_url": "http://45.93.200.15:18589/request",
   "hub_bridge_token": "MiridesBridge_25_03_2026_X7k9Qp",
